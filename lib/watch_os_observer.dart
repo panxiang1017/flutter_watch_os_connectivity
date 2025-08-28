@@ -152,7 +152,7 @@ class WatchOSObserver {
 
           // * add received file to global stream
           fileInfoStreamController
-              .add(Pair(right: rawFileJson["metadata"], left: receivedFile));
+              .add(Pair(right: Map<String, dynamic>.from(rawFileJson["metadata"]) ?? {}, left: receivedFile));
         }
         break;
       case "onPendingFileTransferListChanged":
