@@ -43,6 +43,11 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
         let dir = base.appendingPathComponent("flutter_watch_os_connectivity/received", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // Transient hand-off data; keep it out of iCloud / device backups.
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var mutableDir = dir
+            try? mutableDir.setResourceValues(values)
         }
         return dir
     }
@@ -278,12 +283,12 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
     }
     
     public func sessionDidBecomeInactive(_ session: WCSession) {
-        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState)
+        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState.rawValue)
         getPairedDeviceInfo(session: session)
     }
     
     public func sessionDidDeactivate(_ session: WCSession) {
-        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState)
+        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState.rawValue)
         getPairedDeviceInfo(session: session)
     }
     
@@ -298,8 +303,9 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
         let replyHandlerId = randomString(length: 20)
         messageContent["message"] = message
         messageContent["replyHandlerId"] = replyHandlerId
-        invokeCallbackOnMainThread("messageReceived", arguments: messageContent)
+        // Register before hopping to the main thread so Dart's reply can never race the insert.
         messageReplyHandlers[replyHandlerId] = replyHandler
+        invokeCallbackOnMainThread("messageReceived", arguments: messageContent)
     }
     
     public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
