@@ -21,6 +21,31 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
     init(callbackChannel: FlutterMethodChannel){
         self.callbackChannel = callbackChannel
     }
+
+    /// WCSession delegate callbacks arrive on a background queue, but Flutter platform
+    /// channels must only be used from the platform (main) thread; messages sent from any
+    /// other thread may be dropped silently in release builds. Every native -> Dart callback
+    /// goes through here so `onFileReceived` / `messageReceived` can never be lost that way.
+    private func invokeCallbackOnMainThread(_ method: String, arguments: Any?) {
+        if Thread.isMainThread {
+            callbackChannel.invokeMethod(method, arguments: arguments)
+        } else {
+            DispatchQueue.main.async { [callbackChannel] in
+                callbackChannel.invokeMethod(method, arguments: arguments)
+            }
+        }
+    }
+
+    /// Durable drop location for files received from the Watch. `NSTemporaryDirectory()` can be
+    /// purged by the system before Dart has copied the file out; Application Support is not.
+    private func receivedFilesDirectory() throws -> URL {
+        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = base.appendingPathComponent("flutter_watch_os_connectivity/received", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
     
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method{
@@ -33,7 +58,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
             if  watchSession?.activationState != WCSessionActivationState.activated{
                 watchSession?.activate()
             }else{
-                callbackChannel.invokeMethod("activateStateChanged", arguments: WCSessionActivationState.activated.rawValue)
+                invokeCallbackOnMainThread("activateStateChanged", arguments: WCSessionActivationState.activated.rawValue)
             }
             result(nil)
         case "getActivateState":
@@ -60,7 +85,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
                             var arguments: [String: Any] = [:]
                             arguments["replyMessage"] = replyHandler
                             arguments["replyHandlerId"] = replyHandlerId
-                            self.callbackChannel.invokeMethod("onMessageReplied", arguments: arguments)
+                            self.invokeCallbackOnMainThread("onMessageReplied", arguments: arguments)
                         }
                     }
                     watchSession?.sendMessage(message, replyHandler: handler){ error in
@@ -87,7 +112,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
             if let sentApplicationContext = call.arguments as? [String: Any]{
                 do{
                     try watchSession?.updateApplicationContext(sentApplicationContext)
-                    self.callbackChannel.invokeMethod("onApplicationContextUpdated", arguments: getApplicationContext(session: self.watchSession!))
+                    self.invokeCallbackOnMainThread("onApplicationContextUpdated", arguments: getApplicationContext(session: self.watchSession!))
                 }catch{
                     handleFlutterError(result: result, message: error.localizedDescription)
                 }
@@ -97,7 +122,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
             checkForWatchSession(result: result)
             if let arguments = call.arguments as? [String: Any], let userInfo = arguments["userInfo"] as? [String: Any], let isComplication = arguments["isComplication"] as? Bool{
                 let userInfoTransfer = isComplication ? watchSession!.transferCurrentComplicationUserInfo(userInfo) : watchSession!.transferUserInfo(userInfo)
-                self.callbackChannel.invokeMethod("onPendingUserInfoTransferListChanged", arguments: self.watchSession?.outstandingUserInfoTransfers.map{
+                self.invokeCallbackOnMainThread("onPendingUserInfoTransferListChanged", arguments: self.watchSession?.outstandingUserInfoTransfers.map{
                     $0.toRawTransferDict()
                 })
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: {
@@ -127,7 +152,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: {
                     result(transfer.toRawTransferDict())
                 })
-                self.callbackChannel.invokeMethod("onPendingFileTransferListChanged", arguments: self.watchSession?.outstandingFileTransfers.map{
+                self.invokeCallbackOnMainThread("onPendingFileTransferListChanged", arguments: self.watchSession?.outstandingFileTransfers.map{
                     $0.toRawTransferDict()
                 })
                 return
@@ -156,7 +181,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
                                 // Fallback on earlier versions
                             }
                             if #available(iOS 12.0, *) {
-                                self.callbackChannel.invokeMethod("onFileProgressChanged", arguments: ["transferId": transferId, "progress": transfer.progress.toProgressDict()])
+                                self.invokeCallbackOnMainThread("onFileProgressChanged", arguments: ["transferId": transferId, "progress": transfer.progress.toProgressDict()])
                             }
                             print(self.fileProgressTimers)
                         }
@@ -183,7 +208,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
                     }
                 }){
                     transfer.cancel()
-                    self.callbackChannel.invokeMethod("onPendingUserInfoTransferListChanged", arguments: self.watchSession!.outstandingUserInfoTransfers.map{
+                    self.invokeCallbackOnMainThread("onPendingUserInfoTransferListChanged", arguments: self.watchSession!.outstandingUserInfoTransfers.map{
                         $0.toRawTransferDict()
                     })
                 } else{
@@ -206,7 +231,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
                     }
                 }){
                     transfer.cancel()
-                    self.callbackChannel.invokeMethod("onPendingFileTransferListChanged", arguments: self.watchSession!.outstandingFileTransfers.map{
+                    self.invokeCallbackOnMainThread("onPendingFileTransferListChanged", arguments: self.watchSession!.outstandingFileTransfers.map{
                         $0.toRawTransferDict()
                     })
                 } else{
@@ -239,7 +264,7 @@ public class SwiftFlutterWatchOsConnectivityPlugin: NSObject, FlutterPlugin {
 //MARK: - WCSessionDelegate methods handle
 extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
     public func sessionReachabilityDidChange(_ session: WCSession) {
-        callbackChannel.invokeMethod("reachabilityChanged", arguments: session.isReachable)
+        invokeCallbackOnMainThread("reachabilityChanged", arguments: session.isReachable)
     }
     
     public func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
@@ -247,25 +272,25 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
             handleCallbackError(message: error!.localizedDescription)
             return
         }
-        callbackChannel.invokeMethod("reachabilityChanged", arguments: session.isReachable)
-        callbackChannel.invokeMethod("activateStateChanged", arguments: activationState.rawValue)
+        invokeCallbackOnMainThread("reachabilityChanged", arguments: session.isReachable)
+        invokeCallbackOnMainThread("activateStateChanged", arguments: activationState.rawValue)
         getPairedDeviceInfo(session: session)
     }
     
     public func sessionDidBecomeInactive(_ session: WCSession) {
-        callbackChannel.invokeMethod("activateStateChanged", arguments: session.activationState)
+        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState)
         getPairedDeviceInfo(session: session)
     }
     
     public func sessionDidDeactivate(_ session: WCSession) {
-        callbackChannel.invokeMethod("activateStateChanged", arguments: session.activationState)
+        invokeCallbackOnMainThread("activateStateChanged", arguments: session.activationState)
         getPairedDeviceInfo(session: session)
     }
     
     public func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         var messageContent: [String: Any] = [:]
         messageContent["message"] = message
-        callbackChannel.invokeMethod("messageReceived", arguments: messageContent)
+        invokeCallbackOnMainThread("messageReceived", arguments: messageContent)
     }
     
     public func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
@@ -273,24 +298,24 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
         let replyHandlerId = randomString(length: 20)
         messageContent["message"] = message
         messageContent["replyHandlerId"] = replyHandlerId
-        callbackChannel.invokeMethod("messageReceived", arguments: messageContent)
+        invokeCallbackOnMainThread("messageReceived", arguments: messageContent)
         messageReplyHandlers[replyHandlerId] = replyHandler
     }
     
     public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
-        callbackChannel.invokeMethod("onApplicationContextUpdated", arguments: getApplicationContext(session: session))
+        invokeCallbackOnMainThread("onApplicationContextUpdated", arguments: getApplicationContext(session: session))
     }
     
     public func sessionWatchStateDidChange(_ session: WCSession) {
         do{
-            callbackChannel.invokeMethod("pairDeviceInfoChanged", arguments: try session.toPairedDeviceJsonString())
+            invokeCallbackOnMainThread("pairDeviceInfoChanged", arguments: try session.toPairedDeviceJsonString())
         }catch{
             handleCallbackError(message: error.localizedDescription)
         }
     }
     
     public func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
-        callbackChannel.invokeMethod("onUserInfoReceived", arguments: userInfo)
+        invokeCallbackOnMainThread("onUserInfoReceived", arguments: userInfo)
     }
     
     public func session(_ session: WCSession, didFinish userInfoTransfer: WCSessionUserInfoTransfer, error: Error?) {
@@ -298,9 +323,9 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
             handleCallbackError(message: error!.localizedDescription)
             return
         }
-        callbackChannel.invokeMethod("onUserInfoTransferDidFinish", arguments: userInfoTransfer.toRawTransferDict())
+        invokeCallbackOnMainThread("onUserInfoTransferDidFinish", arguments: userInfoTransfer.toRawTransferDict())
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
-            self.callbackChannel.invokeMethod("onPendingUserInfoTransferListChanged", arguments: self.watchSession!.outstandingUserInfoTransfers.map{
+            self.invokeCallbackOnMainThread("onPendingUserInfoTransferListChanged", arguments: self.watchSession!.outstandingUserInfoTransfers.map{
                 $0.toRawTransferDict()
             })
         })
@@ -311,33 +336,39 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
             handleCallbackError(message: error!.localizedDescription)
             return
         }
-        callbackChannel.invokeMethod("onFileTransferDidFinish", arguments: fileTransfer.toRawTransferDict())
+        invokeCallbackOnMainThread("onFileTransferDidFinish", arguments: fileTransfer.toRawTransferDict())
         if let metadata = fileTransfer.file.metadata, let transferId = metadata["id"] as? String, let timer = fileProgressTimers[transferId]{
             timer.invalidate()
             fileProgressTimers.removeValue(forKey: transferId)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: {
-            self.callbackChannel.invokeMethod("onPendingFileTransferListChanged", arguments: self.watchSession!.outstandingFileTransfers.map{
+            self.invokeCallbackOnMainThread("onPendingFileTransferListChanged", arguments: self.watchSession!.outstandingFileTransfers.map{
                 $0.toRawTransferDict()
             })
         })
     }
     
     public func session(_ session: WCSession, didReceive file: WCSessionFile) {
-        
-        var tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
-        tempURL.appendPathComponent(file.fileURL.lastPathComponent)
+        // WCSession deletes `file.fileURL` as soon as this method returns, so the file must be
+        // moved out synchronously. Prefer the durable inbox; fall back to tmp only if that fails.
+        let destinationDirectory: URL
         do {
-            if FileManager.default.fileExists(atPath: tempURL.path) {
-                try FileManager.default.removeItem(atPath: tempURL.path)
+            destinationDirectory = try receivedFilesDirectory()
+        } catch {
+            destinationDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+        }
+        let destinationURL = destinationDirectory.appendingPathComponent(file.fileURL.lastPathComponent)
+        do {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(atPath: destinationURL.path)
             }
-            try FileManager.default.moveItem(atPath: file.fileURL.path, toPath: tempURL.path)
-            var fileDict: [String: Any] = ["path": tempURL.path]
+            try FileManager.default.moveItem(atPath: file.fileURL.path, toPath: destinationURL.path)
+            var fileDict: [String: Any] = ["path": destinationURL.path]
             if let metadata = file.metadata{
                 fileDict["metadata"] = metadata
             }
             
-            callbackChannel.invokeMethod("onFileReceived", arguments: fileDict)
+            invokeCallbackOnMainThread("onFileReceived", arguments: fileDict)
         } catch {
             handleCallbackError(message: error.localizedDescription)
         }
@@ -351,7 +382,7 @@ extension SwiftFlutterWatchOsConnectivityPlugin: WCSessionDelegate{
 extension SwiftFlutterWatchOsConnectivityPlugin{
     private func getPairedDeviceInfo(session: WCSession){
         do{
-            callbackChannel.invokeMethod("pairDeviceInfoChanged", arguments: try session.toPairedDeviceJsonString())
+            invokeCallbackOnMainThread("pairDeviceInfoChanged", arguments: try session.toPairedDeviceJsonString())
         }catch{
             handleCallbackError(message: error.localizedDescription)
         }
@@ -369,7 +400,7 @@ extension SwiftFlutterWatchOsConnectivityPlugin{
     }
     
     private func handleCallbackError(message: String){
-        callbackChannel.invokeMethod("onError", arguments: message)
+        invokeCallbackOnMainThread("onError", arguments: message)
     }
 }
 
